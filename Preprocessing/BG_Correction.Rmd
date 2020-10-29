@@ -1,0 +1,133 @@
+---
+title: "BG Correction Comparison"
+author: "Mehdi Merbah"
+date: "10/16/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Loading packages
+```{r startup}
+suppressPackageStartupMessages({library("maEndToEnd")})
+```
+
+## Data importing and Storing
+
+```{r loading data}
+raw_data_dir <-  '/home/mehdimerbah/Documents/Data'
+
+sdrf_location <- file.path(raw_data_dir, "E-MEXP-3635.sdrf.txt")
+
+SDRF <- read.delim(sdrf_location)
+
+rownames(SDRF) <- SDRF$Array.Data.File
+
+SDRF <- AnnotatedDataFrame(SDRF)
+
+raw_data <- oligo::read.celfiles(filenames = file.path(raw_data_dir, SDRF$Array.Data.File),verbose = FALSE, phenoData = SDRF)
+
+exp_raw <- log2(Biobase::exprs(raw_data))
+```
+
+## Custom RMA 
+
+
+### Calculating the Parameters for the Model
+
+Here we estimate the parameters for our convoluted model. Note that the parameterEstimation function takes in our intensity values and considers that there are no MM probes.
+
+```{r, echo=TRUE}
+parameterEstimation <- function (PM) 
+  
+  {
+  
+  max.density <- function(x) {
+  aux <- density(x, kernel = "epanechnikov", na.rm = TRUE)
+  aux$x[order(-aux$y)[1]]
+  }
+  
+#max.density is the maximum of the density function of the observed intensities from the microarray data file
+#pmbg is the the value of x at which this maximum occurs, and is also mode of the intensities
+PMmax <- max.density(PM)
+#we assume that the noise is the values in our intensity matrix where the intensity value is less than the mode
+bg_data <- PM[PM < PMmax]
+PMmax <- max.density(bg_data)
+bg_data <- PM[PM < PMmax]
+bg_data <- bg_data - PMmax
+bgsd <- sqrt(sum(bg_data*bg_data)/(length(bg_data)-1))*sqrt(2); 
+sig_data <- PM[PM > PMmax]
+sig_data <- sig_data - PMmax
+expmean <- max.density(sig_data)
+alpha <- 1/expmean
+
+list(mu = PMmax, sigma = bgsd, alpha = alpha)}
+```
+\n We run the parameterEstimation function to get approximate values for the mean the standard deviation, and the rate factor alpha for the exponential function.
+
+### Calculating the RMA Background Corrected Expression
+
+The estimate of the true signal is calculated using the previously computed parameters. We feed the parameters into the convolution of two functions. 
+
+```{r}
+# defines the functions for normexp
+#x is each individual probe
+
+norm_exp <- function(par,x)
+#	Expected value of signal given foreground in normal + exponential model
+#	Gordon Smyth
+#	24 Aug 2002. Last modified 24 February 2012.
+{
+	mu <- par[1]
+	sigma <- exp(par[2])
+	sigma2 <- sigma*sigma
+	alpha <- exp(par[3])
+	if(alpha <= 0) stop("alpha must be positive")
+	if(sigma <= 0) stop("sigma must be positive")
+	#The following parameters are set to calculate the estimated signal given an observed intensity value x
+	a <- x-mu-sigma2*alpha
+	b <- sigma
+	ratio = a/b
+	#The following is calculated according to the estimation formula described in the paper
+	signal <- a + b * (dnorm(0,mean=a,sd=sigma,log=FALSE)/pnorm(0,mean=a,sd=sigma,lower.tail=FALSE,log.p=FALSE))
+	
+	i <- !is.na(signal)
+	if(any(signal[i]<0)) {
+		warning("Limit of numerical accuracy reached with very low intensity or very high background:\nsetting adjusted intensities to small value")
+		signal[i] <- pmax(signal[i],1e-6)
+	}
+	signal
+	#signal must overwrite x
+}
+
+
+```
+\n Our estimates must be of type vector.
+
+```{r}
+estimates <- parameterEstimation(exp_raw)
+estimates <- unlist(estimates, use.names=FALSE)
+transformed <- list(par=c(estimates[1],estimates[2],-log(estimates[3])))
+transformed_vec <- unlist(transformed, use.names = FALSE)
+transformed_vec
+normex <- norm_exp(transformed_vec, exp_raw)
+head(normex, 5)
+```
+```{r}
+background_corrected <- norm_data <- oligo::rma(raw_data, target = "core", normalize = FALSE )
+```
+
+```{r}
+head(Biobase::exprs(background_corrected))
+
+```
+From the following summary we can see that there are major discrepancies in the data. This is due to the parameter estimation. The function needs to be modified to fit new Affymetrix chip data. The density function also needs to be reavluated. 
+```{r}
+summary(normex[,1])
+summary(Biobase::exprs(background_corrected)[,1])
+```
+
+
